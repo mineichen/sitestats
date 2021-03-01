@@ -1,0 +1,20 @@
+[package]
+name = "sitestats"
+version = "0.1.0"
+authors = ["Markus Ineichen <kusi.ineichen@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-web = { version = "3.3.2", features = ["rustls"] }
+chrono = { version = "0.4" }
+env_logger = "0.8"
+actix-files = "0.5"
+futures = "0.3"
+log = "0.4"
+url = { version = "2.2", features = ["serde"] }
+rustls = "0.18" # Used by actix_web
+serde = "1.0"
+webpki-roots = "0.21"
+scraper = "0.12.0"
