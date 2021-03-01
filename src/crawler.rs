@@ -148,6 +148,9 @@ pub struct CrawlerSettings {
     /// use `future::Stream::take()` with a sufficient page_limit if you want an exact number of successful results.
     page_limit: usize,
 
+    /// Maximal timeout until a request is cancelled. The crawler still continues parsing and returns an Error
+    page_timeout: std::time::Duration,
+
     /// Number of concurrently open requests to the crawl target. IO is done on the awaiting thread,
     /// parsing uses the `actix_web::web::block()` threadpool. CrawlerStream doesn't spawn any new threads.
     concurrent_requests: usize
@@ -157,18 +160,19 @@ impl Default for CrawlerSettings {
     fn default() -> Self {
         CrawlerSettings {
             page_limit: 1000,
+            page_timeout: std::time::Duration::from_secs(1),
             concurrent_requests: 20
         }
     }
 }
 
-fn parse(url: Url, data: Bytes) -> Result<Vec<Url>, Error> {
+fn parse(url: &Url, data: Bytes) -> Result<Vec<Url>, Error> {
     let str = String::from_utf8_lossy(data.bytes());
     let fragment = Html::parse_document(str.as_ref());
     let selector = Selector::parse("a[href]").unwrap();
     let links: Vec<Url> = fragment.select(&selector)
         .filter_map(|link_el| {   
-            let base = Url::options().base_url(Some(&url));
+            let base = Url::options().base_url(Some(url));
             base.parse(link_el.value().attr("href").unwrap()).ok()            
         })
         .filter(|a| a.domain() == url.domain() && a.scheme().starts_with("http"))
@@ -179,7 +183,8 @@ fn parse(url: Url, data: Bytes) -> Result<Vec<Url>, Error> {
 
 /// Factory to create CrawlerStreams from urls
 pub struct CrawlerStreamFactory {
-    client: Client
+    client: Client,
+    settings: CrawlerSettings
 }
 
 impl CrawlerStreamFactory {
@@ -189,20 +194,30 @@ impl CrawlerStreamFactory {
         let client = Client::builder()
             .connector(Connector::new().rustls(Arc::new(config)).finish())
             .finish();
-        Self { client }
+        Self { client, settings: CrawlerSettings::default() }
     }
 
     /// Creates a new CrawlerStream for the provided URL 
     pub fn create(&self, start_url: Url) -> CrawlerStream<impl Fn(&Url) -> CrawlJob> {
         let client = self.client.clone();
+        let timeout = self.settings.page_timeout;
         CrawlerStream::new(
             move |url| {
-                let request = client.get(url.as_str()).send();
+                let request = client
+                    .get(url.as_str())
+                    .timeout(timeout)
+                    .send();
+
                 let parse_url = url.clone();
                 async move {
                     let mut response = request.await.map_err(|_| Error { })?;
+                    if response.status() != 200 {
+                        log::info!("Redirect not supportedCode: {}, Url: {}", response.status(), parse_url.as_str());
+                        return Err(Error {})
+                    }
                     let body = response.body().await.map_err(|_| Error { })?;
-                    let vec = actix_web::web::block(|| { parse(parse_url, body) }).await.map_err(|_| Error { })?;
+                    let vec = actix_web::web::block(move || { parse(&parse_url, body) }).await
+                        .map_err(|_| Error { })?;
                     Ok(vec)
                 }.boxed_local()
             }, 
@@ -248,7 +263,7 @@ mod tests {
             let source_url = Url::parse("https://mineichen.ch/home/current.php?test=1").unwrap();
             let expected_url = Url::parse("https://mineichen.ch/home/next.php").unwrap();
             let content = build_page_with_links(std::iter::once(*source));
-            let mut results = parse(source_url, content).expect("Expected parse to succeed").into_iter();
+            let mut results = parse(&source_url, content).expect("Expected parse to succeed").into_iter();
             assert_eq!(Some(expected_url), results.next());
             assert_eq!(None, results.next());
         }
@@ -259,7 +274,7 @@ mod tests {
         for source in ["https://mineichen.ch.com/", "ftp://mineichen.ch"].iter() {
             let source_url = Url::parse("https://mineichen.ch/home/current.php?test=1").unwrap();
             let content = build_page_with_links(std::iter::once(*source));
-            let mut results = parse(source_url, content).expect("Expected parse to succeed").into_iter();
+            let mut results = parse(&source_url, content).expect("Expected parse to succeed").into_iter();
             assert_eq!(None, results.next());
         }       
     }

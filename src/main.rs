@@ -1,6 +1,11 @@
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, middleware::Logger, web};
+//! 
+//! Known limitations:
+//!  - It currently doesn't support redirects. This issue will be resolved when awc::Client supports it.
+//!    (it claims that it does, but it really doesn't: https://github.com/actix/actix-web/issues/1571)
+//!  - WebApi is not encrypted 
+//! 
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, middleware::Logger, web::{self, BufMut}};
 use env_logger::Env;
-use log::{error};
 use futures::prelude::*;
 
 mod crawler;
@@ -12,23 +17,36 @@ struct InvalidUrlError {
 
 #[get("/crawler/domain/{domain}")]
 async fn index(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
-    let mut url_str = domain.into_inner();
-    url_str.insert_str(0, "https://"); // yes, https only unless PO requests otherwise :-)
-    let url = url::Url::parse(&url_str)
-        .map_err(|_| HttpResponse::BadRequest().json(InvalidUrlError { invalid_url: url_str }))?;
-
-    let stream = state.crawler.create(url);
+    let url = parse_url(domain.into_inner())?;
     
-    HttpResponse::Ok().streaming::<_, actix_web::Error>(stream.map(|visit| {
-        let mut buf = actix_web::web::BytesMut::new();
-        use std::fmt::Write;
-        writeln!(&mut buf, "{}", visit.url).map_err(|e| {
-            error!("{}", e);
-            HttpResponse::InternalServerError().finish()
-        })?;
-        
-        Ok(buf.into())
-    })).await
+    HttpResponse::Ok().streaming::<_, actix_web::Error>(state
+        .crawler.create(url)
+        .filter(|v| future::ready(v.result.is_ok()))
+        .map(|visit| {
+            let mut buf = actix_web::web::BytesMut::new();
+            buf.put(visit.url.as_str().as_bytes());
+            buf.put_u8(b'\n');
+            Ok(buf.into())
+        })).await
+}
+
+#[get("/crawler/domain/{domain}/count")]
+async fn count(domain: web::Path<String>, state: web::Data<AppState>) -> Result<String, actix_web::Error> {
+    let url = parse_url(domain.into_inner())?;
+    
+    Ok(state.crawler.create(url)
+        .filter(|v| future::ready(v.result.is_ok()))
+        .fold(0, |acc, _x| async move { acc + 1 })
+        .await
+        .to_string()
+    )
+}
+
+fn parse_url(mut input: String) -> Result<url::Url, actix_web::HttpResponse> {
+    input.insert_str(0, "https://"); // yes, https only unless PO requests otherwise :-)
+    Ok(url::Url::parse(&input)
+        .map_err(|_| HttpResponse::BadRequest().json(InvalidUrlError { invalid_url: input }))?)
+
 }
 
 struct AppState {
@@ -46,6 +64,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(Logger::default())
             .wrap(Logger::new("%a %{User-Agent}i"))
             .service(index)
+            .service(count)
     })
     .bind("0.0.0.0:8080")?
     .run()
