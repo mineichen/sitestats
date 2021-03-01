@@ -16,8 +16,12 @@ struct InvalidUrlError {
 }
 
 #[get("/crawler/domain/{domain}")]
-async fn index(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
-    let url = parse_url(domain.into_inner())?;
+async fn list(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
+    let mut input = domain.into_inner();
+    input.insert_str(0, "https://"); // yes, https only unless PO requests otherwise :-)
+    let url = url::Url::parse(&input)
+        .map_err(|_| HttpResponse::BadRequest()
+            .json(InvalidUrlError { invalid_url: input }))?;
     
     HttpResponse::Ok().streaming::<_, actix_web::Error>(state
         .crawler.create(url)
@@ -42,11 +46,11 @@ async fn count(domain: web::Path<String>, state: web::Data<AppState>) -> Result<
     )
 }
 
-fn parse_url(mut input: String) -> Result<url::Url, actix_web::HttpResponse> {
+fn parse_url(mut input: String) -> Result<url::Url, actix_web::Error> {
     input.insert_str(0, "https://"); // yes, https only unless PO requests otherwise :-)
     Ok(url::Url::parse(&input)
-        .map_err(|_| HttpResponse::BadRequest().json(InvalidUrlError { invalid_url: input }))?)
-
+        .map_err(|_| HttpResponse::BadRequest()
+            .json(InvalidUrlError { invalid_url: input }))?)
 }
 
 struct AppState {
@@ -63,10 +67,34 @@ async fn main() -> std::io::Result<()> {
             })
             .wrap(Logger::default())
             .wrap(Logger::new("%a %{User-Agent}i"))
-            .service(index)
+            .service(list)
             .service(count)
-    })
+    })    
     .bind("0.0.0.0:8080")?
     .run()
     .await
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{test, App};
+
+    #[actix_rt::test]
+    async fn test_invalid_url_fails() {    
+        let mut app = test::init_service(App::new()
+            .data(AppState {
+                crawler: crawler::CrawlerStreamFactory::new_rustls(),
+            })        
+            .service(list)
+            .service(count)
+        ).await;  
+ 
+        let req = test::TestRequest::get().uri("/crawler/domain/i%nvalid").to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert_eq!(400, resp.status());
+
+        let req = test::TestRequest::get().uri("/crawler/domain/i%nvalid/count").to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert_eq!(400, resp.status());
+    }
 }
