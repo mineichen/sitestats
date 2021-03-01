@@ -1,6 +1,6 @@
 //! Lacking of a good/maintained crate alternative. 
-//! - Quick_crawler:0.1.2: the best candidate found, still very young ( during evaluation), no recursion support.
-//! - url-crawler:0.3.0: uses threads. Could be used, but for the reason of this task
+//! - Quick_crawler:0.1.2: the best candidate found, still very young ( during evaluation), no recursion support, aborts on error
+//! - url-crawler:0.3.0: uses threads. While usable for a few users, it requires too many OS threads to be used within a web api.                     
 
 use std::{collections::HashSet, marker::PhantomData, pin::Pin, sync::Arc, task::{Context, Poll}};
 use futures::{prelude::*, Stream, future::LocalBoxFuture};
@@ -60,7 +60,7 @@ pub struct Error {
     
 }
 
-/// Stream 'CrawlerStreamResult' for successful and failed Pages
+/// Streams `CrawlerStreamResult`s for successful and failed crawljobs
 pub struct CrawlerStream<T: Fn(&Url) -> CrawlJob> {
     client: T,
     settings: CrawlerSettings,
@@ -106,7 +106,7 @@ impl<T: Fn(&Url) -> CrawlJob + Unpin> Stream for CrawlerStream<T> {
     }
 }
 
-/// Streams page information starting from a URL with all
+/// Streams page information starting from a single URL
 impl<T: Fn(&Url) -> CrawlJob> CrawlerStream<T> {
     pub fn new(client: T, start_url: Url) -> Self {
         Self::with_settings(client, start_url, CrawlerSettings::default())
@@ -162,17 +162,22 @@ impl Default for CrawlerSettings {
     }
 }
 
-fn parse(data: Bytes) -> Result<Vec<Url>, Error> {
+fn parse(url: Url, data: Bytes) -> Result<Vec<Url>, Error> {
     let str = String::from_utf8_lossy(data.bytes());
     let fragment = Html::parse_document(str.as_ref());
     let selector = Selector::parse("a[href]").unwrap();
     let links: Vec<Url> = fragment.select(&selector)
-        .filter_map(|link_el| Url::parse(link_el.value().attr("href").unwrap()).ok())
+        .filter_map(|link_el| {   
+            let base = Url::options().base_url(Some(&url));
+            base.parse(link_el.value().attr("href").unwrap()).ok()            
+        })
+        .filter(|a| a.domain() == url.domain() && a.scheme().starts_with("http"))
         .collect();
 
     Ok(links)
 }
 
+/// Factory to create CrawlerStreams from urls
 pub struct CrawlerStreamFactory {
     client: Client
 }
@@ -184,7 +189,7 @@ impl CrawlerStreamFactory {
         let client = Client::builder()
             .connector(Connector::new().rustls(Arc::new(config)).finish())
             .finish();
-        Self { client: client }
+        Self { client }
     }
 
     /// Creates a new CrawlerStream for the provided URL 
@@ -193,10 +198,11 @@ impl CrawlerStreamFactory {
         CrawlerStream::new(
             move |url| {
                 let request = client.get(url.as_str()).send();
+                let parse_url = url.clone();
                 async move {
                     let mut response = request.await.map_err(|_| Error { })?;
                     let body = response.body().await.map_err(|_| Error { })?;
-                    let vec = actix_web::web::block(|| { parse(body) }).await.map_err(|_| Error { })?;
+                    let vec = actix_web::web::block(|| { parse(parse_url, body) }).await.map_err(|_| Error { })?;
                     Ok(vec)
                 }.boxed_local()
             }, 
@@ -206,7 +212,7 @@ impl CrawlerStreamFactory {
 
 #[cfg(test)]
 mod tests {
-
+    use actix_web::web::{Buf, BufMut, BytesMut};
     use {super::*, std::collections::HashMap};
     
     #[test]
@@ -234,5 +240,40 @@ mod tests {
         });
 
         assert_eq!(2, all.len());
+    }
+
+    #[test]
+    fn parse_supports_linktypes() {
+        for source in ["https://mineichen.ch/home/next.php", "/home/next.php", "next.php"].iter() {
+            let source_url = Url::parse("https://mineichen.ch/home/current.php?test=1").unwrap();
+            let expected_url = Url::parse("https://mineichen.ch/home/next.php").unwrap();
+            let content = build_page_with_links(std::iter::once(*source));
+            let mut results = parse(source_url, content).expect("Expected parse to succeed").into_iter();
+            assert_eq!(Some(expected_url), results.next());
+            assert_eq!(None, results.next());
+        }
+    }
+
+    #[test]
+    fn parse_doesnt_return_invalid_links() {
+        for source in ["https://mineichen.ch.com/", "ftp://mineichen.ch"].iter() {
+            let source_url = Url::parse("https://mineichen.ch/home/current.php?test=1").unwrap();
+            let content = build_page_with_links(std::iter::once(*source));
+            let mut results = parse(source_url, content).expect("Expected parse to succeed").into_iter();
+            assert_eq!(None, results.next());
+        }       
+    }
+
+    fn build_page_with_links(links: impl IntoIterator<Item=&'static str>) -> Bytes {
+        let mut data = BytesMut::new();
+        data.put(&b"<html><head></head><body>"[..]);
+        for link in links {
+            data.put(&b"<a href=\""[..]);
+            data.put(link.as_bytes());            
+            data.put(&b"\">Link</a>"[..]);
+        }
+            
+        data.put(&b"</body></html>"[..]);
+        data.to_bytes()
     }
 }
