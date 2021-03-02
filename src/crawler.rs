@@ -159,9 +159,9 @@ pub struct CrawlerSettings {
 impl Default for CrawlerSettings {
     fn default() -> Self {
         CrawlerSettings {
-            page_limit: 1000,
+            page_limit: 5000,
             page_timeout: std::time::Duration::from_secs(1),
-            concurrent_requests: 20
+            concurrent_requests: 50
         }
     }
 }

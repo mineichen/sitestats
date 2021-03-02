@@ -14,5 +14,8 @@ Cargo.lock
 
 /target
 
+#docker
+release-*.tar.gz
+
 # OSX Metafiles
 .DS_Store

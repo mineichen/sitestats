@@ -14,10 +14,10 @@ actix-files = "0.5"
 futures = "0.3"
 log = "0.4"
 url = { version = "2.2", features = ["serde"] }
-rustls = "0.18" # Used by actix_web
+rustls = "0.18" # Version is pinned by actix_web
 serde = "1.0"
 webpki-roots = "0.21"
 scraper = "0.12.0"
 
 [dev-dependencies]
-actix-rt = "1.1.1"
+actix-rt = "1.1.1" # Version is pinned by actix_web
