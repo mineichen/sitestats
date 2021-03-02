@@ -2,20 +2,19 @@
 Sitestat aims to be a tool to analyze references within a website and helps to find dead links and insecure http-references to pages in the same domain. It currently supports https pages only.
 
 ## Features
-- [x] List reachable links
-- [x] Count reachable links
+- [x] List links with 2xx http status code
+- [x] Count links with 2xx http status code
+- [x] List links with errors
 - [ ] Settings from cli arguments (Currently crawling is limited to max. 5000 pages/domain)
 - [ ] Automatically follow redirects when crawling
-- [ ] List broken links
-- [ ] Error-details for failed requests
 - [ ] Cache requests
 
 ## Usage
-- http get /crawler/domain/{searchdomain}/list_successful
+- http get /crawler/domain/{searchdomain}/ok
   - Response (http 200) - Stream of all valid urls found on the searchdomain separated by newline
   - Response (http 400) - Unknown searchdomain. Format in body is yet unstable
-- http get /crawler/domain/{searchdomain}/count
-  - Response (http 200) - Body with a single number representing number of reachable links.
+- http get /crawler/domain/{searchdomain}/ok/count
+  - Response (http 200) - Body with a single number representing number of effectually visited links.
   - Response (http 400) - Unknown searchdomain. Format in body is yet unstable
 
 

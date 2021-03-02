@@ -4,7 +4,7 @@
 
 use std::{collections::HashSet, marker::PhantomData, pin::Pin, sync::Arc, task::{Context, Poll}};
 use futures::{prelude::*, Stream, future::LocalBoxFuture};
-use actix_web::{client::{Client, Connector}, web::{Buf, Bytes}};
+use actix_web::web::{Buf, Bytes};
 use scraper::{Html, Selector};
 use url::Url;
 
@@ -16,48 +16,60 @@ trait CrawlJobFactory: Send + Sync + 'static {
 impl<F: Send + Sync + 'static, Fut> CrawlJobFactory for F
 where
     F: Fn(Url) -> Fut,
-    Fut: Future<Output=CrawlJobResult> + Send + 'static,
+    Fut: Future<Output=CrawlerStreamResult> + Send + 'static,
 {
     fn call<'a>(&'a self, url: Url) -> CrawlJob {
         ((self)(url)).boxed_local()     
     }
 }
 
-type CrawlJobResult = Result<Vec<Url>, Error>;
-type CrawlJob = LocalBoxFuture<'static, CrawlJobResult>;
+type CrawlJob = LocalBoxFuture<'static, CrawlerStreamResult>;
 
-/// Result type when polling `CrawlerStream`
+/// Result type when polling `CrawlerStream`.
 pub struct CrawlerStreamResult {
     pub url: Url,
-    pub result: Result<Success, Error>,
+    pub status_code: Option<u16>,
+    /// Found links on a page which will be followed by the 
+    /// `CrawlerStream` if it was not parsed already.
+    pub effectual_candidates: Vec<Url>,
+
+    /// Problems found on the page
+    pub problems: Vec<PageProblem>,
+
     make_ctor_private: PhantomData<()>
 }
 
-impl CrawlerStreamResult {
-    fn new_ok(url: Url, links: Vec<Url>) -> Self {
-        Self {
-            url,
-            result: Ok(Success { links }),
-            make_ctor_private: PhantomData
-        }
-    }
-    fn new_error(url: Url) -> Self {
-        Self {
-            url,
-            result: Err(Error { }),
-            make_ctor_private: PhantomData
-        }
-    }
-}
-/// Success type of `CrawlerStreamResult`
-pub struct Success {
-    pub links: Vec<Url>
+struct ParserResult {
+    effectual_candidates: Vec<Url>,
+    problems: Vec<PageProblem>
 }
 
-/// Error type of `CrawlerStreamResult`
-#[derive(Debug)]
-pub struct Error {
-    
+impl CrawlerStreamResult {
+    pub fn is_ok(&self) -> bool {
+        match self.status_code {
+            Some(v) => v < 300 && v >= 200,
+            None => false
+        }
+    }
+    fn new_error(url: Url, status_code: Option<u16>, problems: Vec<PageProblem>) -> Self {
+        Self {
+            url,
+            status_code,
+            effectual_candidates: Vec::new(),
+            problems,
+            make_ctor_private: PhantomData
+        }
+    }
+}
+
+/// Possible weaknesses detected within a page.
+/// There will be further P
+#[non_exhaustive]
+pub enum PageProblem {
+    #[non_exhaustive]
+    // InsecureLink { url : Url },
+    /// CrawlJob returned a non successful status code or failed to receive body
+    NotAvailable
 }
 
 /// Streams `CrawlerStreamResult`s for successful and failed crawljobs
@@ -81,28 +93,21 @@ impl<T: Fn(&Url) -> CrawlJob + Unpin> Stream for CrawlerStream<T> {
         let item = self.running.iter_mut().take(concurrent).enumerate().find_map(|(i, f)| {
             match f.1.poll_unpin(cx) {
                 Poll::Pending => None,
-                Poll::Ready(e) => Some((i, e)),
+                Poll::Ready(e) => Some((i, e))
             } 
         });
         
         if let Some((idx, result)) = item { 
-            let url = self.running.swap_remove(idx).0;
-            if let Ok(links) = result {
-                log::trace!(
-                    "Suggested links (total: {}): {:?}",  
-                    links.len(),
-                    links.iter().take(10).map(|url| url.to_string()));
-                self.schedule(&links);
-                return Poll::Ready(Some(CrawlerStreamResult::new_ok(url, links)))
-            } else {
-                log::trace!(
-                    "Error in url: {}",
-                    url
-                );
-                return Poll::Ready(Some(CrawlerStreamResult::new_error(url)));
-            }
+            self.running.swap_remove(idx).0;
+            let links = &result.effectual_candidates;
+            log::trace!(
+                "Suggested links (total: {}): {:?},",  
+                links.len(),
+                links.iter().take(10).map(|url| url.to_string()));
+            self.schedule(links);
+            return Poll::Ready(Some(result))
         } 
-        Poll::Pending 
+        Poll::Pending        
     }
 }
 
@@ -166,8 +171,8 @@ impl Default for CrawlerSettings {
     }
 }
 
-fn parse(url: &Url, data: Bytes) -> Result<Vec<Url>, Error> {
-    let str = String::from_utf8_lossy(data.bytes());
+fn parse(url: &Url, body: &Bytes) -> ParserResult {
+    let str = String::from_utf8_lossy(body.bytes());
     let fragment = Html::parse_document(str.as_ref());
     let selector = Selector::parse("a[href]").unwrap();
     let links: Vec<Url> = fragment.select(&selector)
@@ -178,12 +183,12 @@ fn parse(url: &Url, data: Bytes) -> Result<Vec<Url>, Error> {
         .filter(|a| a.domain() == url.domain() && a.scheme().starts_with("http"))
         .collect();
 
-    Ok(links)
+    ParserResult { effectual_candidates: links, problems: Vec::new()}
 }
 
 /// Factory to create CrawlerStreams from urls
 pub struct CrawlerStreamFactory {
-    client: Client,
+    client: actix_web::client::Client,
     settings: CrawlerSettings
 }
 
@@ -191,8 +196,8 @@ impl CrawlerStreamFactory {
     pub fn new_rustls() -> Self {
         let mut config = rustls::ClientConfig::new();
         config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
-        let client = Client::builder()
-            .connector(Connector::new().rustls(Arc::new(config)).finish())
+        let client = actix_web::client::Client::builder()
+            .connector(actix_web::client::Connector::new().rustls(Arc::new(config)).finish())
             .finish();
         Self { client, settings: CrawlerSettings::default() }
     }
@@ -210,19 +215,43 @@ impl CrawlerStreamFactory {
 
                 let parse_url = url.clone();
                 async move {
-                    let mut response = request.await.map_err(|_| Error { })?;
-                    if response.status() != 200 {
-                        log::info!("Redirect not supportedCode: {}, Url: {}", response.status(), parse_url.as_str());
-                        return Err(Error {})
+                    let mut response = match request.await {
+                        Ok(r) => r,
+                        Err(_) => return CrawlerStreamResult::new_error(parse_url, None, vec![])
+                    };
+                    let status_code = response.status().as_u16();
+                    if !response.status().is_success() {
+                        return CrawlerStreamResult::new_error(
+                            parse_url,
+                            Some(status_code),
+                            vec![PageProblem::NotAvailable]
+                         );
                     }
-                    let body = response.body().await.map_err(|_| Error { })?;
-                    let vec = actix_web::web::block(move || { parse(&parse_url, body) }).await
-                        .map_err(|_| Error { })?;
-                    Ok(vec)
+                    
+                    let body = match response.body().await {
+                        Ok(r) => r,
+                        Err(_) => return CrawlerStreamResult::new_error(
+                            parse_url,
+                            Some(status_code),
+                            vec![PageProblem::NotAvailable]
+                         )
+                    };
+                    let result_url = parse_url.clone();
+                    let parse_result = actix_web::web::block::<_,_,()>(move || { 
+                        Ok(parse(&parse_url, &body))
+                    }).await.unwrap();
+            
+                    CrawlerStreamResult {
+                        url: result_url,
+                        status_code: Some(status_code.clone()),
+                        effectual_candidates: parse_result.effectual_candidates,
+                        problems: parse_result.problems,
+                        make_ctor_private: PhantomData
+                    }
                 }.boxed_local()
             }, 
             start_url)
-    }
+    }   
 }
 
 #[cfg(test)]
@@ -243,10 +272,14 @@ mod tests {
 
         let crawler = CrawlerStream::new(
             move |url| {
-                let result = map.get(url).unwrap().clone();
-                async move { 
-                    Ok(result) 
-                }.boxed_local()
+                let result = CrawlerStreamResult {
+                    url: url.clone(),
+                    status_code: Some(200),
+                    effectual_candidates: map.get(url).unwrap().clone(),
+                    problems: Vec::new(),
+                    make_ctor_private: PhantomData                    
+                };
+                async move { result }.boxed_local()
             }, 
             home_url);
 
@@ -263,7 +296,7 @@ mod tests {
             let source_url = Url::parse("https://mineichen.ch/home/current.php?test=1").unwrap();
             let expected_url = Url::parse("https://mineichen.ch/home/next.php").unwrap();
             let content = build_page_with_links(std::iter::once(*source));
-            let mut results = parse(&source_url, content).expect("Expected parse to succeed").into_iter();
+            let mut results = parse(&source_url, &content).effectual_candidates.into_iter();
             assert_eq!(Some(expected_url), results.next());
             assert_eq!(None, results.next());
         }
@@ -274,7 +307,7 @@ mod tests {
         for source in ["https://mineichen.ch.com/", "ftp://mineichen.ch"].iter() {
             let source_url = Url::parse("https://mineichen.ch/home/current.php?test=1").unwrap();
             let content = build_page_with_links(std::iter::once(*source));
-            let mut results = parse(&source_url, content).expect("Expected parse to succeed").into_iter();
+            let mut results = parse(&source_url, &content).effectual_candidates.into_iter();
             assert_eq!(None, results.next());
         }       
     }
