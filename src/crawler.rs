@@ -65,11 +65,12 @@ impl CrawlerStreamResult {
 /// Possible weaknesses detected within a page.
 /// There will be further P
 #[non_exhaustive]
+#[derive(Debug)]
 pub enum PageProblem {
     #[non_exhaustive]
     // InsecureLink { url : Url },
     /// CrawlJob returned a non successful status code or failed to receive body
-    NotAvailable
+    NotOk
 }
 
 /// Streams `CrawlerStreamResult`s for successful and failed crawljobs
@@ -224,7 +225,7 @@ impl CrawlerStreamFactory {
                         return CrawlerStreamResult::new_error(
                             parse_url,
                             Some(status_code),
-                            vec![PageProblem::NotAvailable]
+                            vec![PageProblem::NotOk]
                          );
                     }
                     
@@ -233,7 +234,7 @@ impl CrawlerStreamFactory {
                         Err(_) => return CrawlerStreamResult::new_error(
                             parse_url,
                             Some(status_code),
-                            vec![PageProblem::NotAvailable]
+                            vec![PageProblem::NotOk]
                          )
                     };
                     let result_url = parse_url.clone();
