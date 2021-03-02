@@ -15,7 +15,7 @@ struct InvalidUrlError {
     invalid_url: String
 }
 
-#[get("/crawler/domain/{domain}")]
+#[get("/crawler/domain/{domain}/list_successful")]
 async fn list(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
     let mut input = domain.into_inner();
     input.insert_str(0, "https://"); // yes, https only unless PO requests otherwise :-)
@@ -89,7 +89,7 @@ mod tests {
             .service(count)
         ).await;  
  
-        let req = test::TestRequest::get().uri("/crawler/domain/i%nvalid").to_request();
+        let req = test::TestRequest::get().uri("/crawler/domain/i%nvalid/list_successful").to_request();
         let resp = test::call_service(&mut app, req).await;
         assert_eq!(400, resp.status());
 
