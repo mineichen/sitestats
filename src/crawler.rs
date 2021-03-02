@@ -39,11 +39,6 @@ pub struct CrawlerStreamResult {
     make_ctor_private: PhantomData<()>
 }
 
-struct ParserResult {
-    effectual_candidates: Vec<Url>,
-    problems: Vec<PageProblem>
-}
-
 impl CrawlerStreamResult {
     pub fn is_ok(&self) -> bool {
         match self.status_code {
@@ -62,13 +57,18 @@ impl CrawlerStreamResult {
     }
 }
 
+struct ParserResult {
+    effectual_candidates: Vec<Url>,
+    problems: Vec<PageProblem>
+}
+
 /// Possible weaknesses detected within a page.
 /// There will be further P
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum PageProblem {
     #[non_exhaustive]
-    // InsecureLink { url : Url },
+    InsecureLink { url : Url },
     /// CrawlJob returned a non successful status code or failed to receive body
     NotOk
 }
@@ -176,15 +176,24 @@ fn parse(url: &Url, body: &Bytes) -> ParserResult {
     let str = String::from_utf8_lossy(body.bytes());
     let fragment = Html::parse_document(str.as_ref());
     let selector = Selector::parse("a[href]").unwrap();
-    let links: Vec<Url> = fragment.select(&selector)
+    let interesting_links = fragment.select(&selector)
         .filter_map(|link_el| {   
             let base = Url::options().base_url(Some(url));
             base.parse(link_el.value().attr("href").unwrap()).ok()            
         })
-        .filter(|a| a.domain() == url.domain() && a.scheme().starts_with("http"))
-        .collect();
+        .filter(|a| a.domain() == url.domain() && a.scheme().starts_with("http"));
+    
+    let mut effectual_candidates = Vec::new();
+    let mut problems = Vec::new();
 
-    ParserResult { effectual_candidates: links, problems: Vec::new()}
+    for url in interesting_links {
+        if url.scheme() == "http" {
+            problems.push(PageProblem::InsecureLink { url });
+        } else {
+            effectual_candidates.push(url); 
+        }
+    }
+    ParserResult { effectual_candidates, problems }
 }
 
 /// Factory to create CrawlerStreams from urls
@@ -311,6 +320,23 @@ mod tests {
             let mut results = parse(&source_url, &content).effectual_candidates.into_iter();
             assert_eq!(None, results.next());
         }       
+    }
+
+    #[test]
+    fn parse_adds_problem_for_http_link() {
+        let valid1 = "https://mineichen.ch/home/previous.php";
+        let http = "http://mineichen.ch/home/insecure.php";
+        let valid2 = "https://mineichen.ch/home/next.php";
+
+        let source_url = Url::parse("https://mineichen.ch/").unwrap();
+        let content = build_page_with_links(vec![valid1, http, valid2]);
+        let mut result = parse(&source_url, &content);
+        assert_eq!(2, result.effectual_candidates.len());
+        
+        assert_eq!(
+            vec!(PageProblem::InsecureLink { url: Url::parse(http).unwrap()}),
+            result.problems
+        );    
     }
 
     fn build_page_with_links(links: impl IntoIterator<Item=&'static str>) -> Bytes {
