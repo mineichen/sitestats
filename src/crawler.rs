@@ -83,8 +83,6 @@ struct ParserResult {
     problems: Vec<PageProblem>,
 }
 
-/// Possible weaknesses detected within a page.
-/// There will be further P
 #[non_exhaustive]
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub enum PageProblem {
@@ -155,7 +153,7 @@ impl<T: Fn(&Url) -> CrawlJob> CrawlerStream<T> {
         }
     }
 
-    /// Schedules urls which are not scheduled yet until settings.page_limit is reached
+    /// Schedules urls which are not processed yet until settings.page_limit is reached
     fn schedule(&mut self, links: &Vec<Url>) {
         log::trace!("Schedule '{}' items", links.len());
         for link in links.into_iter() {
@@ -240,12 +238,11 @@ impl CrawlerStreamFactory {
         config
             .root_store
             .add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+        let connector = actix_web::client::Connector::new()
+            .rustls(Arc::new(config))
+            .finish();
         let client = actix_web::client::Client::builder()
-            .connector(
-                actix_web::client::Connector::new()
-                    .rustls(Arc::new(config))
-                    .finish(),
-            )
+            .connector(connector)
             .finish();
         Self {
             client,
@@ -392,6 +389,50 @@ mod tests {
             }),
             result.problems
         );
+    }
+    #[test]
+    fn schedule_accepts_urls_after_already_present() {
+        let home = Url::parse("https://example.ch").unwrap();
+        let mut stream = build_dummy_stream(home.clone());
+
+        stream.schedule(&vec![home, Url::parse("https://example.ch/foo").unwrap()]);
+        assert_eq!(2, stream.scheduled.len());
+        assert_eq!(2, stream.running.len());
+    }
+    #[actix_rt::test]
+    async fn schedule_stops_after_limit() {
+        let home = Url::parse("https://example.ch").unwrap();
+        let mut stream = build_dummy_stream(home.clone());
+
+        stream.schedule(
+            &(0..20)
+                .map(|x| Url::parse(&format!("https://google.ch/{}", x)).unwrap())
+                .collect(),
+        );
+        assert_eq!(10, stream.scheduled.len());
+        assert_eq!(10, stream.running.len());
+
+        stream.next().await;
+        assert_eq!(10, stream.scheduled.len());
+        assert_eq!(9, stream.running.len());
+        stream.schedule(&vec![Url::parse("https://google.ch/other").unwrap()]);
+
+        assert_eq!(10, stream.scheduled.len());
+        assert_eq!(9, stream.running.len());
+    }
+
+    fn build_dummy_stream(home: Url) -> CrawlerStream<impl Fn(&Url) -> CrawlJob> {
+        CrawlerStream::with_settings(
+            move |url| {
+                let result = CrawlerStreamResult::new_error(url.clone(), Some(200), Vec::new());
+                async move { result }.boxed_local()
+            },
+            home.clone(),
+            CrawlerSettings {
+                page_limit: 10,
+                ..CrawlerSettings::default()
+            },
+        )
     }
 
     fn build_page_with_links(links: impl IntoIterator<Item = &'static str>) -> Bytes {
