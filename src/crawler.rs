@@ -52,6 +52,7 @@ pub struct CrawlerStreamResult {
     #[serde(skip)]
     make_ctor_private: PhantomData<()>,
 }
+
 fn serialize_url_as_str<S>(input: &Url, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -230,6 +231,9 @@ pub struct CrawlerStreamFactory {
     settings: CrawlerSettings,
 }
 
+type ActixClientResonse =
+    actix_web::client::ClientResponse<actix_web::dev::Decompress<actix_web::dev::Payload>>;
+
 impl CrawlerStreamFactory {
     pub fn new_rustls() -> Self {
         let mut config = rustls::ClientConfig::new();
@@ -259,7 +263,7 @@ impl CrawlerStreamFactory {
 
                 let parse_url = url.clone();
                 async move {
-                    let mut response = match request.await {
+                    let response = match request.await {
                         Ok(r) => r,
                         Err(_) => return CrawlerStreamResult::new_error(parse_url, None, vec![]),
                     };
@@ -272,38 +276,40 @@ impl CrawlerStreamFactory {
                         );
                     }
 
-                    let body = match response.body().await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return CrawlerStreamResult::new_error(
-                                parse_url,
-                                Some(status_code),
-                                if let PayloadError::Overflow = e {
-                                    Vec::new()
-                                } else {
-                                    vec![PageProblem::NotOk]
-                                },
-                            )
-                        }
-                    };
-                    let result_url = parse_url.clone();
-                    let parse_result =
-                        actix_web::web::block::<_, _, ()>(move || Ok(parse(&parse_url, &body)))
-                            .await
-                            .unwrap();
-
-                    CrawlerStreamResult {
-                        url: result_url,
-                        status_code: Some(status_code),
-                        crawl_candidates: parse_result.crawl_candidates,
-                        problems: parse_result.problems,
-                        make_ctor_private: PhantomData,
-                    }
+                    Self::parse_body(response, parse_url).await
                 }
                 .boxed_local()
             },
             start_url,
         )
+    }
+    async fn parse_body(mut response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
+        let status_code = response.status().as_u16();
+        let body = match response.body().await {
+            Ok(r) => r,
+            Err(e) => {
+                return CrawlerStreamResult::new_error(
+                    parse_url,
+                    Some(status_code),
+                    if let PayloadError::Overflow = e {
+                        Vec::new()
+                    } else {
+                        vec![PageProblem::NotOk]
+                    },
+                )
+            }
+        };
+        let result_url = parse_url.clone();
+        let parse_result = actix_web::web::block::<_, _, ()>(move || Ok(parse(&parse_url, &body)))
+            .await
+            .unwrap();
+        CrawlerStreamResult {
+            url: result_url,
+            status_code: Some(status_code),
+            crawl_candidates: parse_result.crawl_candidates,
+            problems: parse_result.problems,
+            make_ctor_private: PhantomData,
+        }
     }
 }
 
@@ -377,7 +383,7 @@ mod tests {
 
         let source_url = Url::parse("https://mineichen.ch/").unwrap();
         let content = build_page_with_links(vec![valid1, http, valid2]);
-        let mut result = parse(&source_url, &content);
+        let result = parse(&source_url, &content);
         assert_eq!(2, result.crawl_candidates.len());
 
         assert_eq!(
