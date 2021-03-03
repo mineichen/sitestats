@@ -26,7 +26,7 @@ async fn ok(domain: web::Path<String>, state: web::Data<AppState>) -> impl Respo
         })).await
 } 
 
-// Pretty nasty, but i haven't found a better solution for streaming json yet. 
+// Pretty nasty, but I haven't found a better solution for streaming json yet. 
 #[get("/crawler/domain/{domain}/problems")]
 async fn problems(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
     let url = parse_url(domain.into_inner())?;
@@ -118,7 +118,7 @@ mod tests {
     use super::*;
     use actix_web::{test, App};
 
-    
+
     #[actix_rt::test]
     async fn request_invalid_url_returns_400_status() {    
         let mut app = test::init_service(App::new()

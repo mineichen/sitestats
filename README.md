@@ -6,7 +6,7 @@ Sitestat aims to be a tool to analyze references within a website and helps to f
 - [x] Count links with 2xx http status code
 - [x] List links with errors
 - [ ] Settings from cli arguments (Currently crawling is limited to max. 5000 pages/domain)
-- [ ] Automatically follow redirects when crawling
+- [ ] Automatically follow redirects when crawling (actix claims that it can do it, but it actually doesn't: https://github.com/actix/actix-web/issues/1571)
 - [ ] Cache requests
 
 ## Usage
@@ -41,4 +41,4 @@ docker run --rm -p 8080:8080 sitestats:0.0.x
 The tool uses the [actix-web](https://docs.rs/actix-web/3.3.2/actix_web/index.html) framework. To crawl the websites, the builtin Client is used to fetch all pages asynchronously and parallel within a single thread. To avoid blocking the actix-thread, the dom parsing with [scraper](https://docs.rs/scraper/0.12.0/scraper/) is done in the [actix_web::web::block](https://actix.rs/actix-web/actix_web/web/fn.block.html) threadpool.
 
 ## Leightweight container with MUSL
-When compiling and statically linking against linux-musl, the resulting binary doesn't have any dependencies to shared libraries and can therefore be deployed directly onto the empty 'scratch' docker image. This results in a lightweight 16.4MB image which includes just the bare minimum and thus has a very small attack surface and doesn't requiring frequent OS updates.
+When compiling and statically linking against linux-musl target, the resulting binary doesn't have any dependencies to shared libraries and can therefore be deployed directly onto the empty 'scratch' docker image. This results in a lightweight 16.4MB image which includes just the bare minimum and thus has a very small attack surface and doesn't requiring frequent OS updates.
