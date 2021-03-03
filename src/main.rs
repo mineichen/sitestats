@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, middleware::Logger, web::{self, BufMut}};
-use env_logger::Env;
+use env_logger::{Env};
 use futures::prelude::*;
 
 mod crawler;
@@ -26,24 +26,37 @@ async fn ok(domain: web::Path<String>, state: web::Data<AppState>) -> impl Respo
         })).await
 } 
 
+// Pretty nasty, but i haven't found a better solution for streaming json yet. 
 #[get("/crawler/domain/{domain}/problems")]
 async fn problems(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
     let url = parse_url(domain.into_inner())?;
-    
-    HttpResponse::Ok().streaming::<_, actix_web::Error>(state
+    let mut is_first = true;
+    let element_stream = state
         .crawler.create(url)
-        .map(|visit| {
+        .filter(|v| future::ready(!v.problems.is_empty()))
+        .map(move |visit| {            
             let mut buf = actix_web::web::BytesMut::new();
-            for problem in visit.problems {
-                buf.put(visit.url.as_str().as_bytes());
-                buf.put(&b": "[..]);
-                if let Err(_) = buf.write_fmt(format_args!("{:?}", problem)) {
-                    buf.put(&b": "[..]);
-                }
-                buf.put_u8(b'\n');
+            if is_first {
+                is_first = false
+            } else {
+                buf.put_u8(b',');
             }
+
+            if let Ok(str) = serde_json::to_string(&visit) {
+                if !buf.write_str(&str).is_ok() {
+                    log::error!("Failed to write JSON for url {} to the buffer", visit.url.as_str());
+                }
+            } else {
+                log::error!("Failed to convert to JSON. Result for url {} is therefore not sent to the output", visit.url.as_str());
+            }
+            
             Ok(buf.into())
-        })).await
+        });
+    let start = stream::once(future::ready(Ok(actix_web::web::Bytes::from_static(&b"["[..]))));
+    let end = stream::once(future::ready(Ok(actix_web::web::Bytes::from_static(&b"]"[..]))));
+    HttpResponse::Ok().content_type("application/json").streaming::<_, actix_web::Error>(
+        start.chain(element_stream).chain(end)
+    ).await
 } 
 
 #[get("/crawler/domain/{domain}/ok/count")]
@@ -105,6 +118,7 @@ mod tests {
     use super::*;
     use actix_web::{test, App};
 
+    
     #[actix_rt::test]
     async fn request_invalid_url_returns_400_status() {    
         let mut app = test::init_service(App::new()

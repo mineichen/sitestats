@@ -16,8 +16,8 @@ Sitestat aims to be a tool to analyze references within a website and helps to f
 - http get /crawler/domain/{searchdomain}/ok/count - Counts all links with a status in range 200..300
   - Response (http 200) - Body with a single number representing number of effectually visited links.
   - Response (http 400) - Unknown searchdomain. Format in body is yet unstable
-- http get /crawler/domain/{searchdomain}/problems - Lists all links with a status in range 200..300
-  - Response (http 200) - Stream of lines with format: %url%: %problem%  (format is subject to change)
+- http get /crawler/domain/{searchdomain}/problems - Lists problems of a domain
+  - Response (http 200) - JSON response of all error pages (format is not stable and subject to change)
   - Response (http 400) - Unknown searchdomain. Format in body is yet unstable
 - http get /crawler/domain/{searchdomain}/problems/count - Counts all problems
   - Response (http 200) - Body with a single number
