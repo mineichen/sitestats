@@ -38,7 +38,7 @@ docker run --rm -p 8080:8080 sitestats:0.0.x
 
 
 # Technical Details
-The tool uses the [actix-web](https://docs.rs/actix-web/3.3.2/actix_web/index.html) framework. To crawl the websites, the builtin Client is used to fetch all pages asynchronously and parallel within a single thread. To avoid blocking the actix-thread, the dom parsing with [scraper](https://docs.rs/scraper/0.12.0/scraper/) is done in the [actix_web::web::block](https://actix.rs/actix-web/actix_web/web/fn.block.html) threadpool.
+The tool uses the [actix-web](https://docs.rs/actix-web/3.3.2/actix_web/index.html) framework. To crawl the websites, the builtin Client is used to fetch all pages asynchronously and in parallel within a single thread. To avoid blocking the actix-thread, the dom parsing with [scraper](https://docs.rs/scraper/0.12.0/scraper/) is done in the [actix_web::web::block](https://actix.rs/actix-web/actix_web/web/fn.block.html) threadpool.
 
 ## Leightweight container with MUSL
 When compiling and statically linking against linux-musl target, the resulting binary doesn't have any dependencies to shared libraries and can therefore be deployed directly onto the empty 'scratch' docker image. This results in a lightweight 16.4MB image which includes just the bare minimum and thus has a very small attack surface and doesn't requiring frequent OS updates.
