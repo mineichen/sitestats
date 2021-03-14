@@ -109,15 +109,15 @@ impl<T: Fn(&Url) -> CrawlJob + Unpin> Stream for CrawlerStream<T> {
             return Poll::Ready(None);
         }
 
-        let concurrent = self.settings.concurrent_requests;
+        let nr_of_concurrent_requests = self.settings.concurrent_requests;
         let item = self
             .running
             .iter_mut()
-            .take(concurrent)
+            .take(nr_of_concurrent_requests)
             .enumerate()
             .find_map(|(i, f)| match f.1.poll_unpin(cx) {
-                Poll::Pending => None,
                 Poll::Ready(e) => Some((i, e)),
+                Poll::Pending => None,
             });
 
         if let Some((idx, result)) = item {
@@ -264,49 +264,61 @@ impl CrawlerStreamFactory {
                         Ok(r) => r,
                         Err(_) => return CrawlerStreamResult::new_error(parse_url, None, vec![]),
                     };
-                    let status_code = response.status().as_u16();
-                    if !response.status().is_success() && !response.status().is_redirection() {
-                        return CrawlerStreamResult::new_error(
-                            parse_url,
-                            Some(status_code),
-                            vec![PageProblem::NotOk],
-                        );
-                    }
 
-                    Self::parse_body(response, parse_url).await
+                    parse_response(response, parse_url).await
                 }
                 .boxed_local()
             },
             start_url,
         )
     }
-    async fn parse_body(mut response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
-        let status_code = response.status().as_u16();
-        let body = match response.body().await {
-            Ok(r) => r,
-            Err(e) => {
-                return CrawlerStreamResult::new_error(
-                    parse_url,
-                    Some(status_code),
-                    if let PayloadError::Overflow = e {
-                        Vec::new()
-                    } else {
-                        vec![PageProblem::NotOk]
-                    },
-                )
-            }
-        };
-        let result_url = parse_url.clone();
-        let parse_result = actix_web::web::block::<_, _, ()>(move || Ok(parse(&parse_url, &body)))
-            .await
-            .unwrap();
-        CrawlerStreamResult {
-            url: result_url,
-            status_code: Some(status_code),
-            crawl_candidates: parse_result.crawl_candidates,
-            problems: parse_result.problems,
-            make_ctor_private: PhantomData,
+    
+}
+
+async fn parse_response(response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
+    if !response.status().is_success() && !response.status().is_redirection() {
+        parse_error_response(response, parse_url)
+    } else {
+        parse_success_response(response, parse_url).await
+    }
+}
+
+fn parse_error_response(response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
+    return CrawlerStreamResult::new_error(
+        parse_url,
+        Some(response.status().as_u16()),
+        vec![PageProblem::NotOk],
+    );
+}
+
+async fn parse_success_response(mut response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
+    let status_code = response.status().as_u16();
+    
+    let body = match response.body().await {
+        Ok(r) => r,
+        Err(e) => {
+            return CrawlerStreamResult::new_error(
+                parse_url,
+                Some(status_code),
+                if let PayloadError::Overflow = e {
+                    Vec::new()
+                } else {
+                    vec![PageProblem::NotOk]
+                },
+            )
         }
+    };
+    let result_url = parse_url.clone();
+    let parse_result = actix_web::web::block::<_, _, ()>(move || Ok(parse(&parse_url, &body)))
+        .await
+        .unwrap();
+
+    CrawlerStreamResult {
+        url: result_url,
+        status_code: Some(status_code),
+        crawl_candidates: parse_result.crawl_candidates,
+        problems: parse_result.problems,
+        make_ctor_private: PhantomData,
     }
 }
 
