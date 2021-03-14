@@ -1,4 +1,5 @@
 use {
+    actix_extensions::ActixStreamJson,
     actix_web::{
         get,
         middleware::Logger,
@@ -7,9 +8,9 @@ use {
     },
     env_logger::Env,
     futures::prelude::*,
-    std::fmt::Write,
 };
 
+mod actix_extensions;
 mod crawler;
 
 #[derive(serde::Serialize)]
@@ -19,7 +20,7 @@ struct InvalidUrlError {
 
 #[get("/crawler/domain/{domain}/ok")]
 async fn ok(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
-    let url = parse_url(domain.into_inner())?;
+    let url = create_url_from_domain(domain.into_inner())?;
 
     HttpResponse::Ok()
         .streaming::<_, actix_web::Error>(
@@ -37,42 +38,18 @@ async fn ok(domain: web::Path<String>, state: web::Data<AppState>) -> impl Respo
         .await
 }
 
-// Pretty nasty, but I haven't found a better solution for streaming json yet.
 #[get("/crawler/domain/{domain}/problems")]
-async fn problems(domain: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
-    let url = parse_url(domain.into_inner())?;
-    let mut is_first = true;
-    let element_stream = state
-        .crawler.create(url)
-        .filter(|v| future::ready(!v.problems.is_empty()))
-        .map(move |visit| {
-            let mut buf = actix_web::web::BytesMut::new();
-            if is_first {
-                is_first = false
-            } else {
-                buf.put_u8(b',');
-            }
-
-            if let Ok(str) = serde_json::to_string(&visit) {
-                if !buf.write_str(&str).is_ok() {
-                    log::error!("Failed to write JSON for url {} to the buffer", visit.url.as_str());
-                }
-            } else {
-                log::error!("Failed to convert to JSON. Result for url {} is therefore not sent to the output", visit.url.as_str());
-            }
-
-            Ok(buf.into())
-        });
-    let start = stream::once(future::ready(Ok(actix_web::web::Bytes::from_static(
-        &b"["[..],
-    ))));
-    let end = stream::once(future::ready(Ok(actix_web::web::Bytes::from_static(
-        &b"]"[..],
-    ))));
-    HttpResponse::Ok()
-        .content_type("application/json")
-        .streaming::<_, actix_web::Error>(start.chain(element_stream).chain(end))
-        .await
+async fn problems(
+    domain: web::Path<String>,
+    state: web::Data<AppState>,
+) -> actix_web::Result<impl Responder> {
+    let url = create_url_from_domain(domain.into_inner())?;
+    Ok(HttpResponse::Ok().stream_json(
+        state
+            .crawler
+            .create(url)
+            .filter(|v| future::ready(!v.problems.is_empty())),
+    ))
 }
 
 #[get("/crawler/domain/{domain}/ok/count")]
@@ -80,7 +57,7 @@ async fn count_ok(
     domain: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<String, actix_web::Error> {
-    let url = parse_url(domain.into_inner())?;
+    let url = create_url_from_domain(domain.into_inner())?;
 
     Ok(state
         .crawler
@@ -96,7 +73,7 @@ async fn count_problems(
     domain: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<String, actix_web::Error> {
-    let url = parse_url(domain.into_inner())?;
+    let url = create_url_from_domain(domain.into_inner())?;
 
     Ok(state
         .crawler
@@ -106,7 +83,7 @@ async fn count_problems(
         .to_string())
 }
 
-fn parse_url(mut input: String) -> Result<url::Url, actix_web::Error> {
+fn create_url_from_domain(mut input: String) -> Result<url::Url, actix_web::Error> {
     input.insert_str(0, "https://"); // yes, https only unless PO requests otherwise :-)
     Ok(url::Url::parse(&input)
         .map_err(|_| HttpResponse::BadRequest().json(InvalidUrlError { invalid_url: input }))?)

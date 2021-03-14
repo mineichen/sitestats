@@ -37,7 +37,7 @@ where
 type CrawlJob = LocalBoxFuture<'static, CrawlerStreamResult>;
 
 /// Result type when polling `CrawlerStream`.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug)]
 pub struct CrawlerStreamResult {
     #[serde(serialize_with = "serialize_url_as_str")]
     pub url: Url,
