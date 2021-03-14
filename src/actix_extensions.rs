@@ -62,6 +62,7 @@ impl ActixStreamJson for ResponseBuilder {
         TStream: Stream<Item = TItem> + Unpin + 'static,
     {
         let byte_stream = create_bytes_stream(items, settings);
+        self.set_header(actix_http::http::header::CONTENT_TYPE, "application/json");
         self.streaming::<_, serde_json::Error>(byte_stream.boxed_local())
     }
 }
@@ -105,7 +106,7 @@ fn create_bytes_stream(
     }
 }
 
-/// Consumes all full chunks and keeps the remainings in the input
+/// Consumes all chunks of size self.1 and keeps the remainings in the input
 struct FullChunkConsumer<'a, T>(&'a mut Vec<T>, usize);
 impl<'a, T> Iterator for FullChunkConsumer<'a, T> {
     type Item = Vec<T>;
@@ -176,6 +177,11 @@ mod tests {
             let request = test::TestRequest::get().uri(*url).to_request();
             let response = test::call_service(&mut app, request).await;
             assert_eq!(200, response.status());
+            let headers = response.headers();
+            assert_eq!(
+                "application/json", 
+                headers.get(actix_http::http::header::CONTENT_TYPE).expect("Expected to send a content-type")
+            );
 
             assert_eq!(
                 Bytes::from(*expected),
