@@ -1,5 +1,5 @@
 //! Utilities to asynchronously stream JSON in actix
-//! 
+//!
 
 use {
     actix_http::{Response, ResponseBuilder},
@@ -31,7 +31,7 @@ pub trait ActixStreamJson {
     where
         TItem: Serialize + Debug + 'static,
         TStream: Stream<Item = TItem> + Unpin + 'static;
-    
+
     /// Streams the items using the provided settings
     fn stream_json_with_settings<TItem, TStream>(
         self,
@@ -102,7 +102,7 @@ fn create_bytes_stream(
             yield Ok(chunk.into());
         }
 
-        yield Ok(buf.into())       
+        yield Ok(buf.into())
     }
 }
 
@@ -129,9 +129,9 @@ mod tests {
         actix_web::{
             dev::{Body, ServiceResponse},
             test,
-            web::{self, Buf, BytesMut, BufMut, Bytes},
+            web::{self, Buf, BufMut, Bytes, BytesMut},
             App, HttpResponse, Responder,
-        }
+        },
     };
 
     async fn empty() -> impl Responder {
@@ -179,8 +179,10 @@ mod tests {
             assert_eq!(200, response.status());
             let headers = response.headers();
             assert_eq!(
-                "application/json", 
-                headers.get(actix_http::http::header::CONTENT_TYPE).expect("Expected to send a content-type")
+                "application/json",
+                headers
+                    .get(actix_http::http::header::CONTENT_TYPE)
+                    .expect("Expected to send a content-type")
             );
 
             assert_eq!(

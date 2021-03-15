@@ -2,6 +2,8 @@
 //! - Quick_crawler:0.1.2: the best candidate found, still very young ( during evaluation), no recursion support, aborts on error
 //! - url-crawler:0.3.0: uses threads. While usable for a few users, it requires too many OS threads to be used within a web api.                     
 
+use std::collections::HashMap;
+
 use {
     actix_web::{
         error::PayloadError,
@@ -19,22 +21,14 @@ use {
     url::Url,
 };
 
-// Factory to create new jobs for the crawler.
-trait CrawlJobFactory: Send + Sync + 'static {
-    fn call<'a>(&'a self, url: Url) -> CrawlJob;
-}
-
-impl<F: Send + Sync + 'static, Fut> CrawlJobFactory for F
-where
-    F: Fn(Url) -> Fut,
-    Fut: Future<Output = CrawlerStreamResult> + Send + 'static,
-{
-    fn call<'a>(&'a self, url: Url) -> CrawlJob {
-        ((self)(url)).boxed_local()
-    }
-}
-
 type CrawlJob = LocalBoxFuture<'static, CrawlerStreamResult>;
+
+struct HttpResponse {
+    headers: HashMap<String, Vec<u8>>,
+    status: u16,
+    request_url: Url,
+    body_future: LocalBoxFuture<'static, Result<Bytes, Vec<PageProblem>>>
+}
 
 /// Result type when polling `CrawlerStream`.
 #[derive(serde::Serialize, Debug)]
@@ -87,9 +81,14 @@ struct ParserResult {
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 pub enum PageProblem {
     #[non_exhaustive]
-    InsecureLink { url: Url },
+    InsecureLink {
+        url: Url,
+    },
     /// CrawlJob returned a non successful status code or failed to receive body
     NotOk,
+    RedirectTarget {
+        location: Option<String>,
+    },
 }
 
 /// Streams `CrawlerStreamResult`s for successful and failed crawljobs
@@ -177,7 +176,7 @@ pub struct CrawlerSettings {
     /// use `future::Stream::take()` with a sufficient page_limit if you want an exact number of successful results.
     page_limit: usize,
 
-    /// Maximal timeout until a request is cancelled. The crawler still continues parsing
+    /// Maximal timeout until a request is cancelled. The crawler continues parsing other queued urls
     page_timeout: std::time::Duration,
 
     /// Number of concurrently open requests to the crawl target. IO is done on the awaiting thread,
@@ -201,26 +200,34 @@ fn parse(url: &Url, body: &Bytes) -> ParserResult {
     let selector = Selector::parse("a[href]").unwrap();
     let interesting_links = fragment
         .select(&selector)
-        .filter_map(|link_el| {
-            let base = Url::options().base_url(Some(url));
-            base.parse(link_el.value().attr("href").unwrap()).ok()
-        })
-        .filter(|a| a.domain() == url.domain() && a.scheme().starts_with("http"));
+        .filter_map(|link_el| try_make_crawlable_url(url, link_el.value().attr("href").unwrap())
+            .filter(|link |link.domain() == url.domain()));
 
-    let mut effectual_candidates = Vec::new();
+    let mut crawl_candidates = Vec::new();
     let mut problems = Vec::new();
 
     for url in interesting_links {
         if url.scheme() == "http" {
             problems.push(PageProblem::InsecureLink { url });
         } else {
-            effectual_candidates.push(url);
+            crawl_candidates.push(url);
         }
     }
     ParserResult {
-        crawl_candidates: effectual_candidates,
+        crawl_candidates,
         problems,
     }
+}
+
+fn try_make_crawlable_url(base_url: &Url, link: &str) -> Option<Url> {
+    let base = Url::options().base_url(Some(base_url));
+
+    if let Ok(link) = base.parse(link) {
+        if link.scheme().starts_with("http") {
+            return Some(link);
+        }
+    }
+    None
 }
 
 /// Factory to create CrawlerStreams from urls
@@ -228,9 +235,6 @@ pub struct CrawlerStreamFactory {
     client: actix_web::client::Client,
     settings: CrawlerSettings,
 }
-
-type ActixClientResonse =
-    actix_web::client::ClientResponse<actix_web::dev::Decompress<actix_web::dev::Payload>>;
 
 impl CrawlerStreamFactory {
     pub fn new_rustls() -> Self {
@@ -260,61 +264,99 @@ impl CrawlerStreamFactory {
 
                 let parse_url = url.clone();
                 async move {
-                    let response = match request.await {
+                    let mut response = match request.await {
                         Ok(r) => r,
                         Err(_) => return CrawlerStreamResult::new_error(parse_url, None, vec![]),
                     };
+                    let a = HttpResponse {
+                        request_url: parse_url.clone(),
+                        headers: response.headers().into_iter().map(|(name, value)| (
+                            name.as_str().to_string(), 
+                            value.as_bytes().into()
+                        )).collect(),
+                        status: response.status().as_u16(),
+                        body_future: async move { response.body().await.map_err(|x| {                            
+                            if let PayloadError::Overflow = x {
+                                Vec::new()
+                            } else {
+                                vec![PageProblem::NotOk]
+                            }
+                        })}.boxed_local()
+                    };
 
-                    parse_response(response, parse_url).await
+                    parse_response(a).await
                 }
                 .boxed_local()
             },
             start_url,
         )
     }
-    
 }
 
-async fn parse_response(response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
-    if !response.status().is_success() && !response.status().is_redirection() {
-        parse_error_response(response, parse_url)
+async fn parse_response(response: HttpResponse) -> CrawlerStreamResult {
+    if response.status >= 200 && response.status < 300 {
+        parse_success_response(response).await
+    } else if response.status >= 300 && response.status < 400 {
+        parse_redirect_response(response)
     } else {
-        parse_success_response(response, parse_url).await
+        parse_error_response(response)
     }
 }
 
-fn parse_error_response(response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
+fn parse_redirect_response(response: HttpResponse) -> CrawlerStreamResult {
+    let problem = match response.headers.get("location") {
+        Some(location_header) => match String::from_utf8(location_header.clone()) {
+            Ok(location) => match try_make_crawlable_url(&response.request_url, &location) {
+                Some(redirect_url) => {
+                    return CrawlerStreamResult {
+                        url: response.request_url,
+                        status_code: Some(response.status),
+                        crawl_candidates: vec![redirect_url],
+                        problems: Vec::new(),
+                        make_ctor_private: PhantomData,
+                    }
+                }
+                None => PageProblem::RedirectTarget {
+                    location: Some(location.to_string()),
+                },
+            },
+            Err(_) => PageProblem::RedirectTarget {
+                location: Some(String::from_utf8_lossy(location_header).to_string()),
+            },
+        },
+        None => PageProblem::RedirectTarget { location: None },
+    };
+    CrawlerStreamResult::new_error(response.request_url, Some(response.status), vec![problem])
+}
+
+fn parse_error_response(response: HttpResponse) -> CrawlerStreamResult {
     return CrawlerStreamResult::new_error(
-        parse_url,
-        Some(response.status().as_u16()),
+        response.request_url,
+        Some(response.status),
         vec![PageProblem::NotOk],
     );
 }
 
-async fn parse_success_response(mut response: ActixClientResonse, parse_url: Url) -> CrawlerStreamResult {
-    let status_code = response.status().as_u16();
-    
-    let body = match response.body().await {
+async fn parse_success_response(response: HttpResponse) -> CrawlerStreamResult {
+    let status_code = response.status;
+
+    let body: Bytes = match response.body_future.await {
         Ok(r) => r,
         Err(e) => {
             return CrawlerStreamResult::new_error(
-                parse_url,
+                response.request_url,
                 Some(status_code),
-                if let PayloadError::Overflow = e {
-                    Vec::new()
-                } else {
-                    vec![PageProblem::NotOk]
-                },
+                e,
             )
         }
     };
-    let result_url = parse_url.clone();
-    let parse_result = actix_web::web::block::<_, _, ()>(move || Ok(parse(&parse_url, &body)))
+    let result_url = response.request_url.clone();
+    let parse_result = actix_web::web::block::<_, _, ()>(move || Ok(parse(&result_url, &body)))
         .await
         .unwrap();
 
     CrawlerStreamResult {
-        url: result_url,
+        url: response.request_url,
         status_code: Some(status_code),
         crawl_candidates: parse_result.crawl_candidates,
         problems: parse_result.problems,
