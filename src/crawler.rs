@@ -160,11 +160,14 @@ impl<T: Fn(&Url) -> CrawlJob> CrawlerStream<T> {
             if self.scheduled.len() >= self.settings.page_limit {
                 break;
             }
-            if !self.scheduled.insert(link.clone()) {
+            let mut link_without_hash = link.clone();
+            link_without_hash.set_fragment(None);
+
+            if !self.scheduled.insert(link_without_hash.clone()) {
                 continue;
             }
-            let task = (self.client)(&link);
-            self.running.push((link.clone(), task));
+            let task = (self.client)(&link_without_hash);
+            self.running.push((link_without_hash, task));
         }
     }
 }
@@ -373,11 +376,13 @@ mod tests {
     async fn resolve_recursive_once() {
         let home_url = Url::parse("https://foo.ch").unwrap();
         let home_with_slash = Url::parse("https://foo.ch/").unwrap();
+        let home_with_hashtag = Url::parse("https://foo.ch/#").unwrap();
         let bar_url = Url::parse("https://foo.ch/bar").unwrap();
         let mut map = HashMap::new();
         map.insert(home_url.clone(), vec![bar_url.clone()]);
-        map.insert(home_with_slash, vec![bar_url.clone()]);
-        map.insert(bar_url.clone(), vec![home_url.clone()]);
+        map.insert(home_with_slash.clone(), vec![bar_url.clone()]);
+        map.insert(home_with_hashtag.clone(), vec![bar_url.clone()]);
+        map.insert(bar_url.clone(), vec![home_url.clone(), home_with_hashtag, home_with_slash]);
 
         let crawler = CrawlerStream::new(
             move |url| {
